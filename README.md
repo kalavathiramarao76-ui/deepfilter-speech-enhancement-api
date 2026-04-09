@@ -4,21 +4,27 @@ A FastAPI-based REST API for real-time speech enhancement using [DeepFilterNet3]
 
 ## Features
 
-- **Single file enhancement** — Upload one audio file, get back enhanced WAV
-- **Batch enhancement** — Upload multiple files, get back a ZIP of enhanced WAVs
+- **Async job tracking** — Submit audio, get a `job_id` instantly, poll for progress, download when ready
+- **Per-file attenuation** — Set different noise reduction levels for each file in a batch
+- **Single file enhancement** — Upload one audio file, track and download result
+- **Batch enhancement** — Upload multiple files with individual settings, get a ZIP or download files individually
 - **WebSocket streaming** — Stream audio chunks in real-time for live enhancement
 - **Any audio format** — Supports WAV, MP3, M4A/AAC, OGG, OPUS, FLAC, WebM, WMA, and more (auto-converts via ffmpeg)
-- **Adjustable noise reduction** — Optional `atten_lim_db` parameter to control enhancement intensity
+- **Browser UI** — Upload page with per-file controls and live job polling at `/`
 
 ## API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/health` | Health check |
 | `GET` | `/` | Browser-friendly upload page |
-| `POST` | `/enhance` | Enhance a single audio file |
-| `POST` | `/enhance/batch` | Enhance multiple files (returns ZIP) |
-| `WS` | `/enhance/stream` | Real-time streaming enhancement |
+| `GET` | `/health` | Health check (model info, active jobs) |
+| `POST` | `/enhance` | Submit single file → returns `job_id` |
+| `POST` | `/enhance/batch` | Submit multiple files with per-file attenuation → returns `job_id` |
+| `GET` | `/status/{job_id}` | Check job progress (per-file status) |
+| `GET` | `/download/{job_id}` | Download all results (WAV for single, ZIP for batch) |
+| `GET` | `/download/{job_id}/{filename}` | Download a specific file from a batch (no need to wait for all) |
+| `GET` | `/jobs` | List all jobs |
+| `WS` | `/enhance/stream` | Real-time streaming enhancement via WebSocket |
 
 ## Quick Start
 
@@ -47,36 +53,142 @@ python app.py
 # Server starts on http://0.0.0.0:8000
 ```
 
-### 3. Test
+### 3. Interactive docs
+
+- **Browser UI**: `http://localhost:8000` — upload page with per-file attenuation and job polling
+- **Swagger UI**: `http://localhost:8000/docs`
+- **ReDoc**: `http://localhost:8000/redoc`
+
+## Usage Examples
+
+### Single File Enhancement
 
 ```bash
-# Health check
-curl http://localhost:8000/health
-
-# Enhance a single file
+# Submit
 curl -X POST http://localhost:8000/enhance \
   -F "file=@noisy_audio.wav" \
-  -o enhanced.wav
+  -F "atten_lim_db=20"
 
-# Enhance an M4A file with attenuation limit
-curl -X POST http://localhost:8000/enhance \
-  -F "file=@recording.m4a" \
-  -F "atten_lim_db=20" \
-  -o enhanced.wav
+# Response: {"job_id": "abc123", "status": "queued", "message": "..."}
 
-# Batch enhance multiple files
-curl -X POST http://localhost:8000/enhance/batch \
-  -F "files=@file1.wav" \
-  -F "files=@file2.m4a" \
-  -F "files=@file3.mp3" \
-  -o enhanced_batch.zip
+# Poll status
+curl http://localhost:8000/status/abc123
+
+# Response: {"job_id": "abc123", "status": "completed", "progress": "1/1", ...}
+
+# Download result
+curl http://localhost:8000/download/abc123 -o enhanced.wav
 ```
 
-### 4. Interactive docs
+### Batch Enhancement with Per-File Attenuation
 
-Open `http://localhost:8000/docs` for Swagger UI or `http://localhost:8000` for a simple browser upload page.
+Each file gets its own noise reduction level:
+
+```bash
+# Submit with per-file settings
+curl -X POST http://localhost:8000/enhance/batch \
+  -F "files=@meeting.wav" \
+  -F "files=@call.m4a" \
+  -F "files=@interview.mp3" \
+  -F 'settings_json={"meeting.wav": 10, "call.m4a": 25, "interview.mp3": null}'
+
+# Response:
+# {
+#   "job_id": "def456",
+#   "total_files": 3,
+#   "files": {
+#     "meeting.wav":   {"atten_lim_db": 10,   "status": "queued"},
+#     "call.m4a":      {"atten_lim_db": 25,   "status": "queued"},
+#     "interview.mp3": {"atten_lim_db": null,  "status": "queued"}
+#   }
+# }
+```
+
+- `10` = light noise reduction (10 dB limit)
+- `25` = heavy noise reduction (25 dB limit)
+- `null` = full enhancement (no limit)
+
+### Polling Job Status
+
+```bash
+curl http://localhost:8000/status/def456
+
+# Response:
+# {
+#   "job_id": "def456",
+#   "status": "processing",
+#   "progress": "2/3",
+#   "files": {
+#     "meeting.wav":   {"status": "completed"},
+#     "call.m4a":      {"status": "processing"},
+#     "interview.mp3": {"status": "queued"}
+#   },
+#   "download_url": null
+# }
+```
+
+### Downloading Results
+
+```bash
+# Download all as ZIP (when job is completed)
+curl http://localhost:8000/download/def456 -o batch.zip
+
+# Download a specific file (as soon as it's done, no need to wait for others)
+curl http://localhost:8000/download/def456/meeting.wav -o meeting_enhanced.wav
+```
+
+### List All Jobs
+
+```bash
+curl http://localhost:8000/jobs
+
+# Response:
+# [
+#   {"job_id": "def456", "status": "completed", "job_type": "batch", "total_files": 3, "completed": 3},
+#   {"job_id": "abc123", "status": "completed", "job_type": "single", "total_files": 1, "completed": 1}
+# ]
+```
+
+### Python Client Example
+
+```python
+import requests, json, time
+
+BASE = "http://localhost:8000"
+
+# Submit batch with per-file attenuation
+files = [
+    ("files", ("meeting.wav", open("meeting.wav", "rb"))),
+    ("files", ("call.m4a", open("call.m4a", "rb"))),
+]
+settings = {"meeting.wav": 15, "call.m4a": 25}
+
+r = requests.post(
+    f"{BASE}/enhance/batch",
+    files=files,
+    data={"settings_json": json.dumps(settings)},
+)
+job_id = r.json()["job_id"]
+print(f"Submitted: {job_id}")
+
+# Poll until done
+while True:
+    status = requests.get(f"{BASE}/status/{job_id}").json()
+    print(f"Progress: {status['progress']} — {status['status']}")
+    if status["status"] == "completed":
+        break
+    time.sleep(2)
+
+# Download ZIP
+r = requests.get(f"{BASE}/download/{job_id}")
+with open("enhanced_batch.zip", "wb") as f:
+    f.write(r.content)
+print("Downloaded!")
+```
 
 ## WebSocket Streaming Protocol
+
+For real-time audio enhancement (e.g., live microphone input):
 
 ```
 1. Connect to ws://localhost:8000/enhance/stream
@@ -85,6 +197,8 @@ Open `http://localhost:8000/docs` for Swagger UI or `http://localhost:8000` for 
 4. Receive enhanced PCM int16 audio chunks back
 5. Send text "END" to signal completion
 ```
+
+The server auto-resamples if your sample rate differs from the model's 48kHz.
 
 ### Python streaming example
 
@@ -127,6 +241,22 @@ cloudflared tunnel --url http://localhost:8000
 ```
 
 This gives you a public `https://*.trycloudflare.com` URL instantly.
+
+## Supported Audio Formats
+
+| Format | Extensions |
+|--------|-----------|
+| WAV | `.wav` |
+| MP3 | `.mp3` |
+| M4A/AAC | `.m4a`, `.aac` |
+| OGG/Vorbis | `.ogg` |
+| Opus | `.opus` |
+| FLAC | `.flac` |
+| WebM | `.webm` |
+| WMA | `.wma` |
+| Any ffmpeg-supported format | ... |
+
+Non-WAV formats are automatically converted using ffmpeg before processing.
 
 ## Tech Stack
 
