@@ -506,8 +506,9 @@ async def enhance_stream(ws: WebSocket):
     Protocol:
       1. Client sends JSON config: {"sample_rate": 16000, "channels": 1, "atten_lim_db": null}
       2. Client sends binary frames of raw PCM int16 audio chunks.
-      3. Server replies with binary frames of enhanced PCM int16 audio.
-      4. Client sends text "END" to signal end of stream.
+      3. Client sends text "END" to signal end of stream.
+      4. Server buffers all audio, enhances in one pass (fastest), then sends back
+         the full enhanced audio as a single binary frame + done JSON.
     """
     await ws.accept()
     try:
@@ -518,28 +519,34 @@ async def enhance_stream(ws: WebSocket):
 
         await ws.send_json({"status": "ready", "model_sr": MODEL_SR})
 
+        # Buffer all incoming audio chunks
+        audio_chunks = []
         while True:
             msg = await ws.receive()
             if msg.get("text") == "END":
-                await ws.send_json({"status": "done"})
                 break
             raw = msg.get("bytes")
             if raw is None:
                 continue
+            audio_chunks.append(raw)
 
-            pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / (1 << 15)
-            audio = torch.from_numpy(pcm).reshape(channels, -1)
-            if client_sr != MODEL_SR:
-                audio = resample(audio, client_sr, MODEL_SR)
+        # Combine all chunks into one tensor
+        all_raw = b"".join(audio_chunks)
+        pcm = np.frombuffer(all_raw, dtype=np.int16).astype(np.float32) / (1 << 15)
+        audio = torch.from_numpy(pcm).reshape(channels, -1)
+        if client_sr != MODEL_SR:
+            audio = resample(audio, client_sr, MODEL_SR)
 
-            loop = asyncio.get_event_loop()
-            enhanced = await loop.run_in_executor(None, _enhance_tensor, audio, atten_lim_db)
+        # Enhance entire audio in one pass (much faster than per-chunk)
+        loop = asyncio.get_event_loop()
+        enhanced = await loop.run_in_executor(None, _enhance_tensor, audio, atten_lim_db)
 
-            if client_sr != MODEL_SR:
-                enhanced = resample(enhanced, MODEL_SR, client_sr)
+        if client_sr != MODEL_SR:
+            enhanced = resample(enhanced, MODEL_SR, client_sr)
 
-            out_pcm = (enhanced * (1 << 15)).to(torch.int16).numpy().tobytes()
-            await ws.send_bytes(out_pcm)
+        out_pcm = (enhanced * (1 << 15)).to(torch.int16).numpy().tobytes()
+        await ws.send_bytes(out_pcm)
+        await ws.send_json({"status": "done", "samples": len(out_pcm) // 2})
 
     except WebSocketDisconnect:
         pass
@@ -575,4 +582,4 @@ app.openapi = custom_openapi
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False, ws_max_size=50 * 1024 * 1024)
