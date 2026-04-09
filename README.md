@@ -34,17 +34,22 @@ A FastAPI-based REST API for real-time speech enhancement using [DeepFilterNet3]
 python3 -m venv venv
 source venv/bin/activate
 
-# Install PyTorch (CPU)
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+# Install PyTorch with CUDA (GPU support)
+pip install torch torchaudio
 
 # Install API dependencies
 pip install -r requirements.txt
 
 # Install ffmpeg for multi-format support
 pip install imageio-ffmpeg
+
+# Fix torchaudio compatibility for deepfilternet
+python setup_compat.py
 ```
 
 > **Note:** `deepfilternet` requires Rust to compile its native extension. Install Rust via [rustup.rs](https://rustup.rs/) if not already available.
+>
+> **GPU:** The API automatically uses CUDA if available. PyTorch 2.11+ with CUDA 13.0 is recommended for GPU acceleration.
 
 ### 2. Run the server
 

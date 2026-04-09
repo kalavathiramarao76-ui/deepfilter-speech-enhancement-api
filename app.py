@@ -30,7 +30,7 @@ from typing import Optional
 
 import numpy as np
 import torch
-import torchaudio
+import soundfile as sf_io
 import imageio_ffmpeg
 from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
@@ -153,8 +153,8 @@ def _load_and_enhance(audio_bytes: bytes, filename: str, atten_lim_db: Optional[
         buf = io.BytesIO()
         if enhanced.ndim == 1:
             enhanced = enhanced.unsqueeze(0)
-        enhanced_int16 = (enhanced * (1 << 15)).to(torch.int16)
-        torchaudio.save(buf, enhanced_int16, MODEL_SR, format="wav")
+        enhanced_int16 = (enhanced * (1 << 15)).to(torch.int16).numpy().T
+        sf_io.write(buf, enhanced_int16, MODEL_SR, format="WAV", subtype="PCM_16")
         buf.seek(0)
         return buf.read()
     finally:
