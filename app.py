@@ -47,6 +47,14 @@ model, df_state, _ = init_df()
 MODEL_SR = df_state.sr()  # 48000
 print(f"Model ready  –  sample rate: {MODEL_SR} Hz")
 
+# ── CUDA Warmup (eliminates cold-start latency on first request) ────────────
+print("Warming up CUDA kernels...")
+_warmup_audio = torch.randn(1, MODEL_SR * 2)  # 2 seconds of dummy audio
+_ = enhance(model, df_state, _warmup_audio)
+del _warmup_audio
+torch.cuda.synchronize() if torch.cuda.is_available() else None
+print("Warmup complete — ready for low-latency inference")
+
 app = FastAPI(
     title="DeepFilterNet Speech Enhancement API",
     version="2.0.0",
@@ -259,7 +267,7 @@ async function pollJob(id,outId){
       txt+='\\nGET '+B+'/download/'+id;
     }
     out.textContent=txt;
-  },1500);
+  },300);
 }
 async function checkStatus(){
   const id=document.getElementById('jobIdInput').value.trim();if(!id)return;
