@@ -505,9 +505,9 @@ async def enhance_stream(ws: WebSocket):
 
     Protocol:
       1. Client sends JSON config:
-         {"sample_rate": 16000, "channels": 1, "atten_lim_db": null, "mode": "batch"}
-         mode: "batch" (default, fastest) = buffer all audio, enhance once, send back full result
-               "stream" = per-chunk enhance, respond after each chunk (higher latency but progressive)
+         {"sample_rate": 16000, "channels": 1, "atten_lim_db": null, "mode": "stream"}
+         mode: "stream" (default) = per-chunk enhance, respond after each chunk (real-time compatible)
+               "batch" = buffer all audio, enhance once, send back full result (fastest for offline)
       2. Client sends binary frames of raw PCM int16 audio chunks.
       3. Client sends text "END" to signal end of stream.
       4. Server responds based on mode.
@@ -518,7 +518,7 @@ async def enhance_stream(ws: WebSocket):
         client_sr = int(config.get("sample_rate", MODEL_SR))
         channels = int(config.get("channels", 1))
         atten_lim_db = config.get("atten_lim_db", None)
-        ws_mode = config.get("mode", "batch")
+        ws_mode = config.get("mode", "stream")
 
         await ws.send_json({"status": "ready", "model_sr": MODEL_SR, "mode": ws_mode})
 
