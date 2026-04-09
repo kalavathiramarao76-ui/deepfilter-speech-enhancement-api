@@ -504,11 +504,13 @@ async def enhance_stream(ws: WebSocket):
     Streaming speech enhancement over WebSocket.
 
     Protocol:
-      1. Client sends JSON config: {"sample_rate": 16000, "channels": 1, "atten_lim_db": null}
+      1. Client sends JSON config:
+         {"sample_rate": 16000, "channels": 1, "atten_lim_db": null, "mode": "batch"}
+         mode: "batch" (default, fastest) = buffer all audio, enhance once, send back full result
+               "stream" = per-chunk enhance, respond after each chunk (higher latency but progressive)
       2. Client sends binary frames of raw PCM int16 audio chunks.
       3. Client sends text "END" to signal end of stream.
-      4. Server buffers all audio, enhances in one pass (fastest), then sends back
-         the full enhanced audio as a single binary frame + done JSON.
+      4. Server responds based on mode.
     """
     await ws.accept()
     try:
@@ -516,37 +518,61 @@ async def enhance_stream(ws: WebSocket):
         client_sr = int(config.get("sample_rate", MODEL_SR))
         channels = int(config.get("channels", 1))
         atten_lim_db = config.get("atten_lim_db", None)
+        ws_mode = config.get("mode", "batch")
 
-        await ws.send_json({"status": "ready", "model_sr": MODEL_SR})
+        await ws.send_json({"status": "ready", "model_sr": MODEL_SR, "mode": ws_mode})
 
-        # Buffer all incoming audio chunks
-        audio_chunks = []
-        while True:
-            msg = await ws.receive()
-            if msg.get("text") == "END":
-                break
-            raw = msg.get("bytes")
-            if raw is None:
-                continue
-            audio_chunks.append(raw)
-
-        # Combine all chunks into one tensor
-        all_raw = b"".join(audio_chunks)
-        pcm = np.frombuffer(all_raw, dtype=np.int16).astype(np.float32) / (1 << 15)
-        audio = torch.from_numpy(pcm).reshape(channels, -1)
-        if client_sr != MODEL_SR:
-            audio = resample(audio, client_sr, MODEL_SR)
-
-        # Enhance entire audio in one pass (much faster than per-chunk)
         loop = asyncio.get_event_loop()
-        enhanced = await loop.run_in_executor(None, _enhance_tensor, audio, atten_lim_db)
 
-        if client_sr != MODEL_SR:
-            enhanced = resample(enhanced, MODEL_SR, client_sr)
+        if ws_mode == "stream":
+            # Per-chunk mode: enhance and respond after each chunk
+            while True:
+                msg = await ws.receive()
+                if msg.get("text") == "END":
+                    await ws.send_json({"status": "done"})
+                    break
+                raw = msg.get("bytes")
+                if raw is None:
+                    continue
 
-        out_pcm = (enhanced * (1 << 15)).to(torch.int16).numpy().tobytes()
-        await ws.send_bytes(out_pcm)
-        await ws.send_json({"status": "done", "samples": len(out_pcm) // 2})
+                pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / (1 << 15)
+                audio = torch.from_numpy(pcm).reshape(channels, -1)
+                if client_sr != MODEL_SR:
+                    audio = resample(audio, client_sr, MODEL_SR)
+
+                enhanced = await loop.run_in_executor(None, _enhance_tensor, audio, atten_lim_db)
+
+                if client_sr != MODEL_SR:
+                    enhanced = resample(enhanced, MODEL_SR, client_sr)
+
+                out_pcm = (enhanced * (1 << 15)).to(torch.int16).numpy().tobytes()
+                await ws.send_bytes(out_pcm)
+        else:
+            # Batch mode (default): buffer all, enhance once, send full result
+            audio_chunks = []
+            while True:
+                msg = await ws.receive()
+                if msg.get("text") == "END":
+                    break
+                raw = msg.get("bytes")
+                if raw is None:
+                    continue
+                audio_chunks.append(raw)
+
+            all_raw = b"".join(audio_chunks)
+            pcm = np.frombuffer(all_raw, dtype=np.int16).astype(np.float32) / (1 << 15)
+            audio = torch.from_numpy(pcm).reshape(channels, -1)
+            if client_sr != MODEL_SR:
+                audio = resample(audio, client_sr, MODEL_SR)
+
+            enhanced = await loop.run_in_executor(None, _enhance_tensor, audio, atten_lim_db)
+
+            if client_sr != MODEL_SR:
+                enhanced = resample(enhanced, MODEL_SR, client_sr)
+
+            out_pcm = (enhanced * (1 << 15)).to(torch.int16).numpy().tobytes()
+            await ws.send_bytes(out_pcm)
+            await ws.send_json({"status": "done", "samples": len(out_pcm) // 2})
 
     except WebSocketDisconnect:
         pass
